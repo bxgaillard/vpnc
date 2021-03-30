@@ -1122,6 +1122,9 @@ static int do_config_to_env(struct sa_block *s, struct isakmp_attribute *a)
 			DEBUG(2, printf("got save password setting: %d\n", a->u.attr_16));
 			break;
 
+		case ISAKMP_XAUTH_06_ATTRIB_STATUS:
+			break;
+
 		default:
 			DEBUG(2, printf("unknown attribute %d / 0x%X\n", a->type, a->type));
 			break;
@@ -2218,6 +2221,7 @@ static int do_phase2_xauth(struct sa_block *s)
 	int loopcount;
 	int reject;
 	int passwd_used = 0;
+	int config_done = 0;
 
 	DEBUGTOP(2, printf("S5.1 xauth_request\n"));
 	/* This can go around for a while.  */
@@ -2402,44 +2406,24 @@ static int do_phase2_xauth(struct sa_block *s)
 
 	}
 
-	if ((opt_vendor == VENDOR_NETSCREEN) &&
-		(r->payload->next->u.modecfg.type == ISAKMP_MODECFG_CFG_SET)) {
-		struct isakmp_attribute *a = r->payload->next->u.modecfg.attributes;
-
-		DEBUGTOP(2, printf("S5.5.1 do netscreen modecfg extra\n"));
-
-		do_config_to_env(s, a);
-
-		for (; a; a = a->next)
-			if(a->af == isakmp_attr_lots)
-				a->u.lots.length = 0;
-
-		r->payload->next->u.modecfg.type = ISAKMP_MODECFG_CFG_ACK;
-		sendrecv_phase2(s, r->payload->next,
-						ISAKMP_EXCHANGE_MODECFG_TRANSACTION,
-						r->message_id, 0, 0, 0, 0, 0);
-
-		reject = do_phase2_notice_check(s, &r, NULL, 0, 0);
-		if (reject == -1) {
-			free_isakmp_packet(r);
-			return 1;
-		}
-	}
-
 	DEBUGTOP(2, printf("S5.6 process xauth set\n"));
 	{
-		/* The final SET should have just one attribute.  */
 		struct isakmp_attribute *a = r->payload->next->u.modecfg.attributes;
 		uint16_t set_result = 1;
 
-		if (a == NULL
-			|| a->type != ISAKMP_XAUTH_06_ATTRIB_STATUS
-			|| a->af != isakmp_attr_16 || a->next != NULL) {
-			reject = ISAKMP_N_INVALID_PAYLOAD_TYPE;
-			phase2_fatal(s, "xauth SET message rejected: %s(%d)", reject);
-		} else {
-			set_result = a->u.attr_16;
-		}
+		reject = do_config_to_env(s, a);
+		if (reject != 0)
+			phase2_fatal(s, "configuration response rejected: %s(%d)", reject);
+
+		for (; a; a = a->next)
+			if (a->type == ISAKMP_XAUTH_06_ATTRIB_STATUS
+				&& a->af == isakmp_attr_16)
+				set_result = a->u.attr_16;
+			else {
+				config_done = -1;
+				if (a->af == isakmp_attr_lots)
+					a->u.lots.length = 0;
+			}
 
 		/* ACK the SET.  */
 		DEBUGTOP(2, printf("S5.7 send xauth ack\n"));
@@ -2453,7 +2437,7 @@ static int do_phase2_xauth(struct sa_block *s)
 			error(2, 0, "authentication unsuccessful");
 	}
 	DEBUGTOP(2, printf("S5.8 xauth done\n"));
-	return 0;
+	return config_done;
 }
 
 static int do_phase2_config(struct sa_block *s)
@@ -3283,8 +3267,10 @@ int main(int argc, char **argv)
 		if (s->ike.auth_algo >= IKE_AUTH_HybridInitRSA)
 			do_load_balance = do_phase2_xauth(s);
 		DEBUGTOP(2, printf("S6 do_phase2_config\n"));
-		if ((opt_vendor == VENDOR_CISCO || opt_vendor == VENDOR_FORTIGATE) && (do_load_balance == 0))
+		if (do_load_balance == 0)
 			do_load_balance = do_phase2_config(s);
+		else if (do_load_balance == -1)
+			do_load_balance = 0;
 	} while (do_load_balance);
 	DEBUGTOP(2, printf("S7 setup_link (phase 2 + main_loop)\n"));
 	DEBUGTOP(2, printf("S7.0 run interface setup script\n"));
